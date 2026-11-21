@@ -180,6 +180,22 @@ For lists like inverters, use the index:
 - `G2M_GOODWE_INVERTERS_0_IP_ADDRESS`
 - `G2M_GOODWE_INVERTERS_0_SERIAL_NUMBER`
 - `G2M_GOODWE_INVERTERS_0_FAMILY` (optional; detected from the serial number when unset)
+- `G2M_GOODWE_INVERTERS_0_TIMEZONE` (optional; see below)
+
+### Inverter Clock Timezone
+
+Each inverter's own clock (published as `timestamp` in its runtime data) carries no
+timezone. Set the zone that inverter is configured with so the daemon can publish its
+timestamp in UTC. The setting is per-inverter, so inverters in different zones can run
+side by side.
+
+| Variable | Config Path | Description |
+|----------|-----------|-------------|
+| `G2M_GOODWE_INVERTERS_<index>_TIMEZONE` | `goodwe.inverters[<index>].timezone` | IANA zone name, e.g. `Europe/Berlin`. Optional; when unset that inverter's timestamp is published as it reports it. |
+
+An invalid zone name stops the daemon at startup rather than silently mislabelling every
+timestamp. The daemon's own `last_seen` field is unaffected by this setting — it is always
+the daemon's local time.
 
 ## Security
 

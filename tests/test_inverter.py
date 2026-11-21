@@ -1,4 +1,5 @@
 import pytest
+import pytz
 from unittest.mock import patch, MagicMock, AsyncMock
 from datetime import datetime
 import goodwe2mqtt
@@ -213,4 +214,98 @@ async def test_get_grid_export_limit_negative_value():
     mock_inverter.get_grid_export_limit.return_value = 32768
     result = await gw.get_grid_export_limit()
     assert result == -32768
+
+
+def _make_gw_with_timezone(timezone_name):
+    with patch("asyncio.ensure_future", side_effect=suppress_ensure_future):
+        return goodwe2mqtt.Goodwe_MQTT(
+            serial_number="TEST_SN",
+            ip_address="1.2.3.4",
+            mqtt_broker_ip="127.0.0.1",
+            mqtt_broker_port=1883,
+            mqtt_username="",
+            mqtt_password="",
+            mqtt_topic_prefix="test",
+            mqtt_control_topic_postfix="control",
+            mqtt_runtime_data_topic_postfix="data",
+            mqtt_runtime_data_interval_seconds=5,
+            mqtt_fast_runtime_data_topic_postfix="fast",
+            mqtt_fast_runtime_data_interval_seconds=1,
+            mqtt_grid_export_limit_topic_postfix="limit",
+            inverter_timezone=timezone_name,
+        )
+
+
+@pytest.mark.asyncio
+async def test_runtime_data_timestamp_converted_to_utc():
+    """An inverter clock in CET is published as the equivalent UTC instant."""
+    gw = _make_gw_with_timezone("Europe/Berlin")
+    gw.inverter = AsyncMock()
+    # 2026-11-21 12:24:22 CET == 11:24:22 UTC
+    gw.inverter.read_runtime_data.return_value = {
+        "timestamp": datetime(2026, 11, 21, 12, 24, 22),
+        "ppv": 5000,
+    }
+
+    await gw.read_runtime_data()
+
+    assert gw.runtime_data["timestamp"] == "2026-11-21T11:24:22+00:00"
+
+
+@pytest.mark.asyncio
+async def test_runtime_data_timestamp_summer_time():
+    """The conversion follows the zone's DST rules, so CEST is UTC+2."""
+    gw = _make_gw_with_timezone("Europe/Berlin")
+    gw.inverter = AsyncMock()
+    gw.inverter.read_runtime_data.return_value = {
+        "timestamp": datetime(2026, 7, 21, 12, 0, 0),   # CEST, UTC+2
+        "ppv": 5000,
+    }
+
+    await gw.read_runtime_data()
+
+    assert gw.runtime_data["timestamp"] == "2026-07-21T10:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_runtime_data_timestamp_unchanged_without_timezone():
+    """Without a configured zone the reading is published as the inverter reports it."""
+    gw = _make_gw_with_timezone("")
+    gw.inverter = AsyncMock()
+    gw.inverter.read_runtime_data.return_value = {
+        "timestamp": datetime(2026, 11, 21, 12, 24, 22),
+        "ppv": 5000,
+    }
+
+    await gw.read_runtime_data()
+
+    assert gw.runtime_data["timestamp"] == "2026-11-21T12:24:22"
+
+
+@pytest.mark.asyncio
+async def test_runtime_data_timestamp_unchanged_when_already_aware():
+    """An already timezone-aware reading is left alone; it needs no conversion."""
+    gw = _make_gw_with_timezone("Europe/Berlin")
+    gw.inverter = AsyncMock()
+    gw.inverter.read_runtime_data.return_value = {
+        "timestamp": datetime(2026, 11, 21, 12, 24, 22, tzinfo=pytz.UTC),
+        "ppv": 5000,
+    }
+
+    await gw.read_runtime_data()
+
+    assert gw.runtime_data["timestamp"] == "2026-11-21T12:24:22+00:00"
+
+
+def test_inverter_clock_to_utc_rejects_unknown_zone():
+    """An unknown zone logs and returns None rather than raising."""
+    result = goodwe2mqtt.inverter_clock_to_utc(
+        datetime(2026, 11, 21, 12, 0, 0), "Not/AZone"
+    )
+    assert result is None
+
+
+def test_inverter_clock_to_utc_returns_none_without_zone():
+    """No configured zone means no conversion is possible."""
+    assert goodwe2mqtt.inverter_clock_to_utc(datetime(2026, 11, 21, 12, 0, 0), "") is None
 

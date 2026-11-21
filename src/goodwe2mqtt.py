@@ -116,7 +116,8 @@ def override_config_from_env(config: Dict[str, Any], prefix: str = "G2M") -> Non
 def override_inverters_from_env(config: Dict[str, Any], prefix: str = "G2M") -> None:
     """Overrides inverter list from indexed environment variables."""
     inverter_pattern = re.compile(
-        rf"^{re.escape(prefix)}_GOODWE_INVERTERS_(\d+)_(SERIAL_NUMBER|IP_ADDRESS|FAMILY)$"
+        rf"^{re.escape(prefix)}_GOODWE_INVERTERS_(\d+)"
+        r"_(SERIAL_NUMBER|IP_ADDRESS|FAMILY|TIMEZONE)$"
     )
     inverters = config["goodwe"]["inverters"]
 
@@ -129,7 +130,9 @@ def override_inverters_from_env(config: Dict[str, Any], prefix: str = "G2M") -> 
         field_name = match.group(2).lower()
 
         while len(inverters) <= index:
-            inverters.append({"serial_number": "", "ip_address": "", "family": ""})
+            inverters.append(
+                {"serial_number": "", "ip_address": "", "family": "", "timezone": ""}
+            )
 
         inverters[index][field_name] = env_val
 
@@ -215,6 +218,34 @@ def get_timezone_aware_local_time() -> datetime:
     local_time = pytz.timezone(str(timezone)).localize(now, is_dst=False)
     return local_time
 
+
+def inverter_clock_to_utc(
+    timestamp: datetime, timezone_name: str
+) -> Optional[datetime]:
+    """Converts an inverter clock reading to UTC.
+
+    The inverter's clock registers carry no offset, so a reading is a naive datetime
+    in whatever zone the inverter was configured with. ``timezone_name`` supplies that
+    zone; without it the reading cannot be converted.
+
+    Args:
+        timestamp: The naive datetime read from the inverter's clock.
+        timezone_name: The IANA zone the inverter's clock is set to, e.g. "Europe/Berlin".
+
+    Returns:
+        The same instant in UTC, or None when no conversion is possible: no zone is
+        configured, the reading is already timezone-aware, or the zone is unknown.
+    """
+    if not timezone_name or timestamp.tzinfo is not None:
+        return None
+    try:
+        local = pytz.timezone(timezone_name).localize(timestamp, is_dst=False)
+    except (pytz.UnknownTimeZoneError, pytz.AmbiguousTimeError, pytz.NonExistentTimeError) as e:
+        log.error(f"inverter_clock_to_utc: cannot convert {timestamp} in {timezone_name!r}: {e}")
+        return None
+    return local.astimezone(pytz.UTC)
+
+
 class Goodwe_MQTT:
     """Handles communication between a GoodWe inverter and an MQTT broker."""
 
@@ -233,7 +264,8 @@ class Goodwe_MQTT:
         mqtt_fast_runtime_data_topic_postfix: str,
         mqtt_fast_runtime_data_interval_seconds: int,
         mqtt_grid_export_limit_topic_postfix: str,
-        family: str = ""
+        family: str = "",
+        inverter_timezone: str = ""
     ) -> None:
         """Initializes the Goodwe_MQTT instance.
 
@@ -253,10 +285,14 @@ class Goodwe_MQTT:
             mqtt_grid_export_limit_topic_postfix: Postfix for export limit topic.
             family: Inverter family for goodwe.connect(), e.g. "ET" or "DT". Empty (the
                 default) lets the library detect the family from the serial number.
+            inverter_timezone: IANA zone the inverter's own clock is set to, e.g.
+                "Europe/Berlin". Used to convert its timestamp to UTC. Empty leaves the
+                timestamp as the inverter reports it.
         """
         self.serial_number = serial_number
         self.ip_address = ip_address
         self.family = family
+        self.inverter_timezone = inverter_timezone
         self._confirm_tasks: Dict[str, "asyncio.Task"] = {}   # setting -> its pending confirmation
 
         self.mqtt_broker_ip = mqtt_broker_ip
@@ -1118,9 +1154,17 @@ class Goodwe_MQTT:
         try:
             self.runtime_data = await self.inverter.read_runtime_data()
             if self.runtime_data:
-                # Replace timestamp object with ISO string for JSON serialization
+                # The inverter's clock carries no offset, so publish it in UTC when its
+                # zone is known; otherwise leave it as the inverter reports it.
                 if 'timestamp' in self.runtime_data:
-                    self.runtime_data['timestamp'] = self.runtime_data['timestamp'].isoformat()
+                    raw_timestamp = self.runtime_data['timestamp']
+                    utc_timestamp = (
+                        inverter_clock_to_utc(raw_timestamp, self.inverter_timezone)
+                        if isinstance(raw_timestamp, datetime) else None
+                    )
+                    self.runtime_data['timestamp'] = (
+                        utc_timestamp.isoformat() if utc_timestamp else raw_timestamp.isoformat()
+                    )
                 
                 self.runtime_data['serial_number'] = self.serial_number
                 self.runtime_data['last_seen'] = get_timezone_aware_local_time().isoformat()
@@ -1653,7 +1697,8 @@ async def main(config: Dict[str, Any]) -> None:
             mqtt_fast_runtime_data_topic_postfix=config["mqtt"]["fast_runtime_data_topic_postfix"],
             mqtt_fast_runtime_data_interval_seconds=config["mqtt"]["fast_runtime_data_interval_seconds"],
             mqtt_grid_export_limit_topic_postfix=config["mqtt"]["grid_export_limit_topic_postfix"],
-            family=inverter_config.get("family", "")
+            family=inverter_config.get("family", ""),
+            inverter_timezone=inverter_config.get("timezone", "")
         )
 
         await inv.connect_inverter()
@@ -1744,6 +1789,20 @@ def read_config(file_path: str) -> Dict[str, Any]:
                 )
                 sys.exit(1)
             inverter["family"] = family
+
+            timezone_name = str(inverter.get("timezone", "") or "").strip()
+            if timezone_name:
+                try:
+                    pytz.timezone(timezone_name)
+                except pytz.UnknownTimeZoneError:
+                    log.error(
+                        f"Invalid G2M_GOODWE_INVERTERS_<index>_TIMEZONE {timezone_name!r} "
+                        f"for inverter {inverter.get('serial_number')!r}: expected an IANA "
+                        "name such as 'Europe/Berlin'. The inverter's timestamp cannot be "
+                        "converted to UTC without a valid zone."
+                    )
+                    sys.exit(1)
+            inverter["timezone"] = timezone_name
 
         return config
     except Exception as e:

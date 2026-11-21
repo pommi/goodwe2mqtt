@@ -14,8 +14,16 @@ By default, `<topic_prefix>` is `goodwe2mqtt`.
 - **Payload:** JSON object containing all available sensors from the inverter.
 - **Example:**
   ```json
-  {"timestamp": "2026-01-24T12:00:00", "vpv1": 450.5, "ppv": 3200, ...}
+  {"timestamp": "2026-01-24T11:00:00+00:00", "vpv1": 450.5, "ppv": 3200, ...}
   ```
+
+> **`timestamp` is the inverter's own clock, published in UTC.** The inverter's clock
+> registers carry no timezone, so set `G2M_GOODWE_INVERTERS_<index>_TIMEZONE` to the zone
+> that inverter is configured with (e.g. `Europe/Berlin`); the daemon then converts the
+> reading to UTC and appends `+00:00`. Without that setting the value is published exactly as
+> the inverter reports it, with no offset — so `2026-01-24T12:00:00` would be the inverter's
+> local clock, not UTC. `last_seen` is separate: it is the daemon's read time in the daemon's
+> own zone.
 
 ### 2. Fast Runtime Data
 - **Topic:** `goodwe2mqtt/<serial>/fast_runtime_data`

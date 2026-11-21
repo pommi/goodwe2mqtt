@@ -57,3 +57,51 @@ def test_read_config_rejects_an_unknown_family():
     }, clear=True):
         with pytest.raises(SystemExit):
             goodwe2mqtt.read_config("dummy.yaml")
+
+
+def test_read_config_inverter_timezone_is_optional():
+    """Without a zone the inverter's timestamp is left as the inverter reports it."""
+    with patch.dict(os.environ, {
+        "G2M_GOODWE_INVERTERS_0_SERIAL_NUMBER": "SN123",
+        "G2M_GOODWE_INVERTERS_0_IP_ADDRESS": "192.168.1.100",
+    }, clear=True):
+        config = goodwe2mqtt.read_config("dummy.yaml")
+        assert config["goodwe"]["inverters"][0]["timezone"] == ""
+
+
+def test_read_config_accepts_an_iana_timezone():
+    """The inverter's clock zone is passed through to the daemon."""
+    with patch.dict(os.environ, {
+        "G2M_GOODWE_INVERTERS_0_SERIAL_NUMBER": "SN123",
+        "G2M_GOODWE_INVERTERS_0_IP_ADDRESS": "192.168.1.100",
+        "G2M_GOODWE_INVERTERS_0_TIMEZONE": "Europe/Berlin",
+    }, clear=True):
+        config = goodwe2mqtt.read_config("dummy.yaml")
+        assert config["goodwe"]["inverters"][0]["timezone"] == "Europe/Berlin"
+
+
+def test_read_config_allows_a_different_timezone_per_inverter():
+    """Each inverter carries its own clock zone."""
+    with patch.dict(os.environ, {
+        "G2M_GOODWE_INVERTERS_0_SERIAL_NUMBER": "SN123",
+        "G2M_GOODWE_INVERTERS_0_IP_ADDRESS": "192.168.1.100",
+        "G2M_GOODWE_INVERTERS_0_TIMEZONE": "Europe/Berlin",
+        "G2M_GOODWE_INVERTERS_1_SERIAL_NUMBER": "SN456",
+        "G2M_GOODWE_INVERTERS_1_IP_ADDRESS": "192.168.1.101",
+        "G2M_GOODWE_INVERTERS_1_TIMEZONE": "America/New_York",
+    }, clear=True):
+        config = goodwe2mqtt.read_config("dummy.yaml")
+        inverters = config["goodwe"]["inverters"]
+        assert inverters[0]["timezone"] == "Europe/Berlin"
+        assert inverters[1]["timezone"] == "America/New_York"
+
+
+def test_read_config_rejects_an_unknown_timezone():
+    """A bad zone would make every timestamp unconvertible, so fail at startup."""
+    with patch.dict(os.environ, {
+        "G2M_GOODWE_INVERTERS_0_SERIAL_NUMBER": "SN123",
+        "G2M_GOODWE_INVERTERS_0_IP_ADDRESS": "192.168.1.100",
+        "G2M_GOODWE_INVERTERS_0_TIMEZONE": "Not/AZone",
+    }, clear=True):
+        with pytest.raises(SystemExit):
+            goodwe2mqtt.read_config("dummy.yaml")
