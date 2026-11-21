@@ -48,7 +48,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "grid_export_limit_topic_postfix": "grid_export_limit",
     },
     "goodwe": {
-        "inverters": []
+        "inverters": [],
+        # When true, an inverter that goes unreachable (as a solar inverter does at night) is
+        # logged once at INFO and then at DEBUG until it responds again, instead of an error
+        # every few seconds. See Goodwe_MQTT.quiet_when_offline.
+        "quiet_when_offline": False,
     },
     "sec1000s": {
         "devices": []
@@ -265,7 +269,8 @@ class Goodwe_MQTT:
         mqtt_fast_runtime_data_interval_seconds: int,
         mqtt_grid_export_limit_topic_postfix: str,
         family: str = "",
-        inverter_timezone: str = ""
+        inverter_timezone: str = "",
+        quiet_when_offline: bool = False
     ) -> None:
         """Initializes the Goodwe_MQTT instance.
 
@@ -288,11 +293,17 @@ class Goodwe_MQTT:
             inverter_timezone: IANA zone the inverter's own clock is set to, e.g.
                 "Europe/Berlin". Used to convert its timestamp to UTC. Empty leaves the
                 timestamp as the inverter reports it.
+            quiet_when_offline: When True, a failed read is logged at INFO the first time and
+                at DEBUG while it keeps failing, so an inverter that goes unreachable at night
+                does not fill the log with one error every few seconds. Recovery is logged once.
         """
         self.serial_number = serial_number
         self.ip_address = ip_address
         self.family = family
         self.inverter_timezone = inverter_timezone
+        self.quiet_when_offline = quiet_when_offline
+        # True while the inverter is in a run of failed reads; reset by the first success.
+        self._offline = False
         self._confirm_tasks: Dict[str, "asyncio.Task"] = {}   # setting -> its pending confirmation
 
         self.mqtt_broker_ip = mqtt_broker_ip
@@ -465,6 +476,7 @@ class Goodwe_MQTT:
             f"  inverter:  ip={self.ip_address} family={family}\n"
             f"  broker:    ip={self.mqtt_broker_ip} port={self.mqtt_broker_port} user={self.mqtt_username}\n"
             f"  intervals: runtime_data={interval_rt}s  fast_runtime_data={interval_fast}s\n"
+            f"  offline:   quiet_when_offline={str(self.quiet_when_offline).lower()}\n"
             f"  topics:    control={self.mqtt_control_topic}\n"
             f"             runtime_data={self.mqtt_runtime_data_topic}\n"
             f"             grid_export_limit={self.grid_export_limit_topic}"
@@ -520,7 +532,13 @@ class Goodwe_MQTT:
             )
             return self.inverter
         except Exception as e:
-            log.error(f'Failed to connect to inverter {self.serial_number} at {self.ip_address}: {e}')
+            # A connect failure is the first thing an inverter that slept for the night does;
+            # when quieting is on, only the first one of a run is reported above DEBUG.
+            if self.quiet_when_offline and self._offline:
+                log.debug(f'Failed to connect to inverter {self.serial_number} at {self.ip_address}: {e}')
+            else:
+                log.error(f'Failed to connect to inverter {self.serial_number} at {self.ip_address}: {e}')
+            self._offline = True
             self.inverter = None
             return None
 
@@ -1154,6 +1172,10 @@ class Goodwe_MQTT:
         try:
             self.runtime_data = await self.inverter.read_runtime_data()
             if self.runtime_data:
+                if self._offline:
+                    # First success after a run of failures: say so once, then go quiet again.
+                    self._offline = False
+                    log.info(f'read_runtime_data {self.serial_number} responding again')
                 # The inverter's clock carries no offset, so publish it in UTC when its
                 # zone is known; otherwise leave it as the inverter reports it.
                 if 'timestamp' in self.runtime_data:
@@ -1172,7 +1194,17 @@ class Goodwe_MQTT:
                 return self.runtime_data
             return None
         except Exception as e:
-            log.error(f'read_runtime_data {self.serial_number} failed: {e}')
+            # An inverter with no sunlight goes unreachable and stays unreachable until dawn. When
+            # quiet_when_offline is set, only the first failure of such a run is reported at INFO;
+            # the rest drop to DEBUG so they are hidden unless the log level asks for them.
+            if self.quiet_when_offline and self._offline:
+                log.debug(f'read_runtime_data {self.serial_number} failed: {e}')
+            elif self.quiet_when_offline:
+                log.info(f'read_runtime_data {self.serial_number} failed: {e} '
+                         '(further failures will be logged at DEBUG)')
+            else:
+                log.error(f'read_runtime_data {self.serial_number} failed: {e}')
+            self._offline = True
             return None
 
     async def read_device_info(self) -> Optional[Any]:
@@ -1238,10 +1270,18 @@ class Goodwe_MQTT:
             try:
                 # Check Inverter Connection
                 if self.inverter is None:
-                    log.info(f'main_loop {self.serial_number} Inverter not connected. Attempting...')
+                    # Reconnecting to an inverter that is asleep for the night is the same
+                    # condition as a failed read, so it is quieted the same way.
+                    if self.quiet_when_offline and self._offline:
+                        log.debug(f'main_loop {self.serial_number} Inverter not connected. Attempting...')
+                    else:
+                        log.info(f'main_loop {self.serial_number} Inverter not connected. Attempting...')
                     await self.connect_inverter()
                     if self.inverter is None:
-                        log.warning(f'main_loop {self.serial_number} Connection failed. Retrying in 10s...')
+                        if self.quiet_when_offline and self._offline:
+                            log.debug(f'main_loop {self.serial_number} Connection failed. Retrying in 10s...')
+                        else:
+                            log.warning(f'main_loop {self.serial_number} Connection failed. Retrying in 10s...')
                         await asyncio.sleep(10)
                         continue
 
@@ -1274,7 +1314,12 @@ class Goodwe_MQTT:
                         log.debug(f'main_loop {self.serial_number} reading runtime data')
                         data = await self.read_runtime_data()
                         if data is None:
-                            log.warning(f'main_loop {self.serial_number} Failed to read data. Retrying in 5s...')
+                            # read_runtime_data has already reported the failure; repeat it here only
+                            # when the log is not being quieted for an offline inverter.
+                            if self.quiet_when_offline:
+                                log.debug(f'main_loop {self.serial_number} Failed to read data. Retrying in 5s...')
+                            else:
+                                log.warning(f'main_loop {self.serial_number} Failed to read data. Retrying in 5s...')
                             await asyncio.sleep(5)
                             continue
 
@@ -1698,7 +1743,8 @@ async def main(config: Dict[str, Any]) -> None:
             mqtt_fast_runtime_data_interval_seconds=config["mqtt"]["fast_runtime_data_interval_seconds"],
             mqtt_grid_export_limit_topic_postfix=config["mqtt"]["grid_export_limit_topic_postfix"],
             family=inverter_config.get("family", ""),
-            inverter_timezone=inverter_config.get("timezone", "")
+            inverter_timezone=inverter_config.get("timezone", ""),
+            quiet_when_offline=config["goodwe"].get("quiet_when_offline", False)
         )
 
         await inv.connect_inverter()

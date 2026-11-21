@@ -105,3 +105,24 @@ def test_read_config_rejects_an_unknown_timezone():
     }, clear=True):
         with pytest.raises(SystemExit):
             goodwe2mqtt.read_config("dummy.yaml")
+
+
+def test_read_config_quiet_when_offline_defaults_to_false():
+    """By default an unreachable inverter keeps logging every failure."""
+    with patch.dict(os.environ, {
+        "G2M_GOODWE_INVERTERS_0_SERIAL_NUMBER": "SN123",
+        "G2M_GOODWE_INVERTERS_0_IP_ADDRESS": "192.168.1.100",
+    }, clear=True):
+        config = goodwe2mqtt.read_config("dummy.yaml")
+        assert config["goodwe"]["quiet_when_offline"] is False
+
+
+def test_read_config_quiet_when_offline_parses_true():
+    """The setting is a boolean, parsed from the usual true/1/yes/on spellings."""
+    with patch.dict(os.environ, {
+        "G2M_GOODWE_INVERTERS_0_SERIAL_NUMBER": "SN123",
+        "G2M_GOODWE_INVERTERS_0_IP_ADDRESS": "192.168.1.100",
+        "G2M_GOODWE_QUIET_WHEN_OFFLINE": "true",
+    }, clear=True):
+        config = goodwe2mqtt.read_config("dummy.yaml")
+        assert config["goodwe"]["quiet_when_offline"] is True

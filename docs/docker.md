@@ -174,6 +174,19 @@ until the next fast interval, so `1` means one poll per second. Setting the fast
 does not stop polling — it skips the `.../fast_runtime_data` topic and the loop polls at the
 runtime interval instead. A failed read retries after 5 seconds regardless of these settings.
 
+### Logging an Unreachable Inverter
+
+A solar inverter goes unreachable when there is no sunlight — at night, or under thick cloud —
+and stays unreachable until dawn. By default each failed read logs an error and a warning, so
+an overnight outage fills the log with two lines every 5 seconds.
+
+| Variable | Config Path | Default | Description |
+|----------|-----------|---------|-------------|
+| `G2M_GOODWE_QUIET_WHEN_OFFLINE` | `goodwe.quiet_when_offline` | `false` | When `true`, the first failed read of an outage is logged once at `INFO` and the rest at `DEBUG`; the first successful read afterwards is logged once at `INFO`. Set the log level to `DEBUG` to see the suppressed lines. |
+
+The setting applies to all inverters in the process. It changes only what is logged — the
+daemon keeps polling at the same rate, so the inverter is picked up as soon as it responds.
+
 ### Inverter Overrides
 
 For lists like inverters, use the index:
