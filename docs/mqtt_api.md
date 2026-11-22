@@ -30,6 +30,11 @@ By default, `<topic_prefix>` is `goodwe2mqtt`.
 - **Interval:** Configurable (`fast_runtime_data_interval_seconds`)
 - **Payload:** Same format as Runtime Data, but published more frequently.
 
+> **Intervals that divide 60 s are aligned to the minute.** A 10-second interval publishes at
+> `:00`, `:10`, `:20` rather than from wherever the daemon started. See
+> [Polling Intervals](docker.md#polling-intervals) for the full rule, including intervals
+> longer than a minute.
+
 ### 3. Grid Export Limit
 - **Topic:** `goodwe2mqtt/<serial>/grid_export_limit`
 - **Payload:** JSON object with current export limit and the unit it is expressed in.

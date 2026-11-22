@@ -170,9 +170,24 @@ family, ET and DT alike.
 | `G2M_MQTT_RUNTIME_DATA_INTERVAL_SECONDS` | `mqtt.runtime_data_interval_seconds` | `5` | How often the same reading is also published to `.../runtime_data`. Publication only; it does not cause extra reads. |
 
 The read rate is set by the fast interval alone: the loop polls once per iteration and sleeps
-until the next fast interval, so `1` means one poll per second. Setting the fast interval to `0`
+until the next interval, so `1` means one poll per second. Setting the fast interval to `0`
 does not stop polling — it skips the `.../fast_runtime_data` topic and the loop polls at the
 runtime interval instead. A failed read retries after 5 seconds regardless of these settings.
+
+#### Alignment to the minute
+
+An interval that divides 60 seconds evenly (1, 2, 5, 10, 15, 20, 30, 60) is aligned to the
+wall clock: reads land at `:00`, `:10`, `:20` rather than wherever the daemon happened to
+start. A 10-second interval therefore reads at `00:00:00`, `00:00:10`, `00:00:20` — not
+`00:00:02`, `00:00:12`, `00:00:22`. An interval longer than a minute is aligned to a multiple
+of itself since the epoch, so 300 seconds lands at `:00`, `:05`, `:10`. An interval that
+neither divides a minute nor is a whole number of minutes (7 seconds, say) cannot be aligned
+and is measured from the daemon's start instead.
+
+The interval is measured from the start of one read to the start of the next: a slow read
+shortens the following sleep rather than pushing the next read later. The first read after
+startup happens immediately, so the cadence may be off by up to one interval until the first
+boundary is reached.
 
 ### Logging an Unreachable Inverter
 

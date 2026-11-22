@@ -223,6 +223,38 @@ def get_timezone_aware_local_time() -> datetime:
     return local_time
 
 
+def next_interval_boundary(interval: timedelta, now: Optional[datetime] = None) -> datetime:
+    """The next time an interval lands on a whole minute, at or after now.
+
+    An interval that divides 60 seconds evenly (1, 2, 5, 10, 15, 20, 30, 60) is aligned to
+    the minute, so readings land at :00, :10, :20 rather than wherever the daemon happened
+    to start. Any other interval is aligned to a multiple of itself since the epoch, which
+    is stable across hours: a 300 s interval lands at :00, :05, :10.
+
+    Args:
+        interval: The interval to align.
+        now: The current time; defaults to `datetime.now()`.
+
+    Returns:
+        The next boundary, always strictly after now.
+    """
+    now = now or datetime.now()
+    seconds = interval.total_seconds()
+    if seconds <= 0:
+        return now + interval
+
+    if 60 % seconds == 0:
+        # Divides a minute: align to the minute, so the cadence is the same in every hour.
+        offset = now.minute * 60 + now.second + now.microsecond / 1_000_000
+        return now + timedelta(seconds=seconds - (offset % seconds))
+
+    # A longer interval: align to a multiple of itself since the epoch. This is stable
+    # across hours, so a 300 s interval lands at :00, :05, :10 rather than drifting.
+    epoch = datetime(1970, 1, 1)
+    elapsed = (now - epoch).total_seconds()
+    return now + timedelta(seconds=seconds - (elapsed % seconds))
+
+
 def inverter_clock_to_utc(
     timestamp: datetime, timezone_name: str
 ) -> Optional[datetime]:
@@ -1295,7 +1327,6 @@ class Goodwe_MQTT:
                                 'publishing runtime data and retrying the settings later')
 
                 next_settings_time = datetime.now() + self.SETTINGS_RETRY_INTERVAL
-                next_fast_runtime_data_time = datetime.now()
                 next_runtime_data_time = datetime.now()
 
                 async with aiomqtt.Client(
@@ -1306,11 +1337,17 @@ class Goodwe_MQTT:
 
                     while True:
                         now = datetime.now()
-                        if self.mqtt_fast_runtime_data_interval_seconds.total_seconds() > 0:
-                            next_fast_runtime_data_time = now + self.mqtt_fast_runtime_data_interval_seconds
-                        else:
-                            next_fast_runtime_data_time = now + self.mqtt_runtime_data_interval_seconds
-                        
+                        # The next read lands on the interval's wall-clock boundary when it has
+                        # one (:00, :10, :20 for 10 s), so the cadence is stable across restarts
+                        # and lines up with whole minutes. An interval that cannot be aligned
+                        # falls back to being measured from now.
+                        poll_interval = (
+                            self.mqtt_fast_runtime_data_interval_seconds
+                            if self.mqtt_fast_runtime_data_interval_seconds.total_seconds() > 0
+                            else self.mqtt_runtime_data_interval_seconds
+                        )
+                        next_fast_runtime_data_time = next_interval_boundary(poll_interval, now)
+
                         log.debug(f'main_loop {self.serial_number} reading runtime data')
                         data = await self.read_runtime_data()
                         if data is None:
@@ -1327,15 +1364,20 @@ class Goodwe_MQTT:
                         if self.mqtt_fast_runtime_data_interval_seconds.total_seconds() > 0:
                             await client.publish(self.mqtt_fast_runtime_data_topic, payload=json.dumps(data))
 
-                        # Publish regular runtime data if interval reached
-                        if now >= next_runtime_data_time:
-                            next_runtime_data_time = now + self.mqtt_runtime_data_interval_seconds
+                        # Publish regular runtime data if interval reached. The read just taken is
+                        # the one nearest this boundary, so judge it against the time after the
+                        # read rather than before it; otherwise a slow read delays the publish by
+                        # a whole extra interval.
+                        after_read = datetime.now()
+                        if after_read >= next_runtime_data_time:
+                            next_runtime_data_time = next_interval_boundary(
+                                self.mqtt_runtime_data_interval_seconds, after_read)
                             await client.publish(self.mqtt_runtime_data_topic, payload=json.dumps(data))
 
                         # Retry a failed settings read on a slow cadence, without holding up publishing
-                        if not settings_read and now >= next_settings_time:
+                        if not settings_read and after_read >= next_settings_time:
                             settings_read = await self.read_settings_data() is not None
-                            next_settings_time = now + self.SETTINGS_RETRY_INTERVAL
+                            next_settings_time = datetime.now() + self.SETTINGS_RETRY_INTERVAL
 
                         now = datetime.now()
                         if now < next_fast_runtime_data_time:
@@ -1751,7 +1793,9 @@ async def main(config: Dict[str, Any]) -> None:
         inverters.append(inv)
         asyncio.ensure_future(inv.main_loop())
 
-        # Distribute communication load
+        # Distribute communication load. Half an interval is the most a caller can wait without
+        # delaying the first read past its boundary, so each inverter is staggered by at most
+        # that; the loop then aligns its reads to the interval's wall-clock boundary.
         await asyncio.sleep(config["mqtt"]["fast_runtime_data_interval_seconds"] / 2.0)
 
     # Spawn SEC1000S device instances
